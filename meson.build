@@ -387,3 +387,7 @@ if get_option('build_docs')
     build_by_default: true
   )
 endif
+
+install_data('gismo_integration.sh',
+  install_dir: get_option('bindir')
+)

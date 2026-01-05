@@ -76,6 +76,7 @@
 #define XFERBENCH_BACKEND_OBJ "OBJ"
 #define XFERBENCH_BACKEND_GUSLI "GUSLI"
 #define XFERBENCH_BACKEND_UCCL "UCCL"
+#define XFERBENCH_BACKEND_GISMO "Gismo"
 
 // POSIX API types
 #define XFERBENCH_POSIX_API_AIO "AIO"
@@ -177,6 +178,13 @@ class xferBenchConfig {
         static std::string gusli_config_file;
         static uint64_t gusli_bdev_byte_offset;
         static std::string gusli_device_security;
+
+         // special setting for gismo
+        static bool gismo_offload_mode;
+        static bool gismo_record_metrics;
+        static bool gismo_use_mmap;
+        static int gismo_chunk_size;
+        static std::string gismo_sock_path;
 
         static int
         loadFromFlags();

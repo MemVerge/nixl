@@ -117,6 +117,7 @@ xferBenchNixlWorker::xferBenchNixlWorker(int *argc, char ***argv, std::vector<st
         0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_GPUNETIO) ||
         0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_MOONCAKE) ||
         0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_UCCL) ||
+        0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_GISMO) ||
         xferBenchConfig::isStorageBackend()) {
         backend_name = xferBenchConfig::backend;
     } else {
@@ -262,6 +263,13 @@ xferBenchNixlWorker::xferBenchNixlWorker(int *argc, char ***argv, std::vector<st
     } else if (0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_UCCL)) {
         std::cout << "UCCL backend" << std::endl;
         backend_params["in_python"] = "0";
+    } else if (0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_GISMO)) {
+        // Using param values for Gismo backend
+        backend_params["socket_path"] = xferBenchConfig::gismo_sock_path;
+        backend_params["record_metrics"] = xferBenchConfig::gismo_record_metrics ? "true" : "false";
+        backend_params["chunk_size"] = std::to_string(xferBenchConfig::gismo_chunk_size);
+        backend_params["use_mmap"] = xferBenchConfig::gismo_use_mmap ? "true" : "false";
+        std::cout << "Gismo backend with socket " << xferBenchConfig::gismo_sock_path << std::endl;
     } else {
         std::cerr << "Unsupported NIXLBench backend: " << xferBenchConfig::backend << std::endl;
         exit(EXIT_FAILURE);

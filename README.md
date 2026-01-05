@@ -151,6 +151,7 @@ Common build options:
 
 There are a few environment variables that can be set to configure the build:
 - `NIXL_NO_STUBS_FALLBACK`: If not set or 0, build NIXL stub library if the library build fails
+- `dmo_path`: Path to MemVerge DMO installation (default: /opt/memverge/MemVergeDMO)
 
 ### Building Documentation
 

@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <gflags/gflags.h>
 #include <numeric>
@@ -47,14 +48,16 @@ DEFINE_string(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl, nvshmem
 DEFINE_string(
     backend,
     XFERBENCH_BACKEND_UCX,
-    "Name of NIXL backend [UCX, GDS, GDS_MT, POSIX, GPUNETIO, Mooncake, HF3FS, OBJ, GUSLI] \
-              (only used with nixl worker)");
+    "Name of NIXL backend [UCX, GDS, GDS_MT, POSIX, GPUNETIO, Mooncake, HF3FS, OBJ, GUSLI, GISMO] \
+            (only used with nixl worker)");
 DEFINE_string(initiator_seg_type, XFERBENCH_SEG_TYPE_DRAM, "Type of memory segment for initiator \
               [DRAM, VRAM]. Note: Storage backends always use DRAM locally.");
 DEFINE_string(target_seg_type, XFERBENCH_SEG_TYPE_DRAM, "Type of memory segment for target \
               [DRAM, VRAM]. Note: Storage backends determine remote type automatically.");
 DEFINE_string(scheme, XFERBENCH_SCHEME_PAIRWISE, "Scheme: pairwise, maytoone, onetomany, tp");
-DEFINE_string(mode, XFERBENCH_MODE_SG, "MODE: SG (Single GPU per proc), MG (Multi GPU per proc) [default: SG]");
+DEFINE_string(mode,
+              XFERBENCH_MODE_SG,
+              "MODE: SG (Single GPU per proc), MG (Multi GPU per proc) [default: SG]");
 DEFINE_string(op_type, XFERBENCH_OP_WRITE, "Op type: READ, WRITE");
 DEFINE_bool(check_consistency, false, "Enable Consistency Check");
 DEFINE_uint64(total_buffer_size, 8LL * 1024 * (1 << 20), "Total buffer \
@@ -70,7 +73,7 @@ DEFINE_int32(large_blk_iter_ftr,
              16,
              "factor to reduce test iteration when testing large block size(>1MB)");
 DEFINE_int32(warmup_iter, 100, "Number of warmup iterations before timing");
-DEFINE_int32 (
+DEFINE_int32(
     num_threads,
     1,
     "Number of threads used by benchmark."
@@ -83,13 +86,17 @@ DEFINE_uint64(progress_threads, 0, "Number of progress threads (default: 0)");
 DEFINE_bool(enable_vmm, false, "Enable VMM memory allocation when DRAM is requested");
 
 // Storage backend(GDS, GDS_MT, POSIX, HF3FS, OBJ) options
-DEFINE_string (filepath, "", "File path for storage operations");
-DEFINE_int32 (num_files, 1, "Number of files used by benchmark");
-DEFINE_bool (storage_enable_direct, false, "Enable direct I/O for storage operations");
+DEFINE_string(filepath, "", "File path for storage operations");
+DEFINE_int32(num_files, 1, "Number of files used by benchmark");
+DEFINE_bool(storage_enable_direct, false, "Enable direct I/O for storage operations");
 
 // GDS options - only used when backend is GDS
-DEFINE_int32(gds_batch_pool_size, 32, "Batch pool size for GDS operations (default: 32, only used with GDS backend)");
-DEFINE_int32(gds_batch_limit, 128, "Batch limit for GDS operations (default: 128, only used with GDS backend)");
+DEFINE_int32(gds_batch_pool_size,
+             32,
+             "Batch pool size for GDS operations (default: 32, only used with GDS backend)");
+DEFINE_int32(gds_batch_limit,
+             128,
+             "Batch limit for GDS operations (default: 128, only used with GDS backend)");
 DEFINE_int32(gds_mt_num_threads, 1, "Number of threads used by GDS MT plugin (Default: 1)");
 
 // TODO: We should take rank wise device list as input to extend support
@@ -127,6 +134,13 @@ DEFINE_string(obj_req_checksum,
               XFERBENCH_OBJ_REQ_CHECKSUM_SUPPORTED,
               "Required checksum for S3 backend [supported, required]");
 DEFINE_string(obj_ca_bundle, "", "Path to CA bundle for S3 backend");
+
+// gismo options - only used when backend is gismo
+DEFINE_string(Gismo_sock_path, "dmo.daemon.sock.0", "Domain socket path to connect to DMO");
+DEFINE_bool(Gismo_offload_mode, false, "Use Gismo as offload destination");
+DEFINE_bool(Gismo_record_metrics, false, "Record Gismo performance metrics");
+DEFINE_bool(Gismo_use_mmap, false, "Use mmap for Gismo data transfer");
+DEFINE_int32(Gismo_chunk_size, 2U << 20, "Gismo chunk size");
 
 // HF3FS options - only used when backend is HF3FS
 DEFINE_int32(hf3fs_iopool_size, 64, "Size of io memory pool");
@@ -203,6 +217,12 @@ int xferBenchConfig::gusli_max_simultaneous_requests = 0;
 std::string xferBenchConfig::gusli_config_file = "";
 uint64_t xferBenchConfig::gusli_bdev_byte_offset = 0;
 std::string xferBenchConfig::gusli_device_security = "";
+
+bool xferBenchConfig::gismo_offload_mode = false;
+bool xferBenchConfig::gismo_record_metrics = false;
+bool xferBenchConfig::gismo_use_mmap = false;
+int xferBenchConfig::gismo_chunk_size = 0;
+std::string xferBenchConfig::gismo_sock_path = "";
 
 int
 xferBenchConfig::loadFromFlags() {
@@ -296,6 +316,15 @@ xferBenchConfig::loadFromFlags() {
                 return -1;
             }
         }
+
+        // load gismo-specific configurations if backend is gismo
+        if (backend == XFERBENCH_BACKEND_GISMO) {
+            gismo_offload_mode = FLAGS_Gismo_offload_mode;
+            gismo_record_metrics = FLAGS_Gismo_record_metrics;
+            gismo_sock_path = FLAGS_Gismo_sock_path;
+            gismo_chunk_size = FLAGS_Gismo_chunk_size;
+            gismo_use_mmap = FLAGS_Gismo_use_mmap;
+        }
     }
 
     initiator_seg_type = FLAGS_initiator_seg_type;
@@ -331,10 +360,8 @@ xferBenchConfig::loadFromFlags() {
 
     if (worker_type == XFERBENCH_WORKER_NVSHMEM) {
         if (!((XFERBENCH_SEG_TYPE_VRAM == initiator_seg_type) &&
-              (XFERBENCH_SEG_TYPE_VRAM == target_seg_type) &&
-              (1 == num_threads) &&
-              (1 == num_initiator_dev) &&
-              (1 == num_target_dev) &&
+              (XFERBENCH_SEG_TYPE_VRAM == target_seg_type) && (1 == num_threads) &&
+              (1 == num_initiator_dev) && (1 == num_target_dev) &&
               (XFERBENCH_SCHEME_PAIRWISE == scheme))) {
             std::cerr << "Unsupported configuration for NVSHMEM worker" << std::endl;
             std::cerr << "Supported configuration: " << std::endl;
@@ -351,15 +378,17 @@ xferBenchConfig::loadFromFlags() {
     }
 
     if ((max_block_size * max_batch_size) > (total_buffer_size / num_initiator_dev)) {
-        std::cerr << "Incorrect buffer size configuration for Initiator"
-                  << "(max_block_size * max_batch_size) is > (total_buffer_size / num_initiator_dev)"
-                  << std::endl;
+        std::cerr
+            << "Incorrect buffer size configuration for Initiator"
+            << "(max_block_size * max_batch_size) is > (total_buffer_size / num_initiator_dev)"
+            << std::endl;
         return -1;
     }
     if ((max_block_size * max_batch_size) > (total_buffer_size / num_target_dev)) {
-        std::cerr << "Incorrect buffer size configuration for Target"
-                  << "(max_block_size * max_batch_size) is > (total_buffer_size / num_initiator_dev)"
-                  << std::endl;
+        std::cerr
+            << "Incorrect buffer size configuration for Target"
+            << "(max_block_size * max_batch_size) is > (total_buffer_size / num_initiator_dev)"
+            << std::endl;
         return -1;
     }
     if ((max_block_size * max_batch_size) > (total_buffer_size / num_threads)) {
@@ -379,27 +408,27 @@ xferBenchConfig::loadFromFlags() {
     if (num_iter % partition) {
         num_iter += partition - (num_iter % partition);
         std::cout << "WARNING: Adjusting num_iter to " << num_iter
-                  << " to allow equal distribution to " << num_threads << " threads"
-                  << std::endl;
+                  << " to allow equal distribution to " << num_threads << " threads" << std::endl;
     }
     if (warmup_iter % partition) {
         warmup_iter += partition - (warmup_iter % partition);
         std::cout << "WARNING: Adjusting warmup_iter to " << warmup_iter
-                  << " to allow equal distribution to " << num_threads << " threads"
-                  << std::endl;
+                  << " to allow equal distribution to " << num_threads << " threads" << std::endl;
     }
     partition = (num_initiator_dev * num_threads);
     if (total_buffer_size % partition) {
-        std::cerr << "Total_buffer_size must be divisible by the product of num_threads and num_initiator_dev"
-                  << ", next such value is " << total_buffer_size + partition - (total_buffer_size % partition)
-                  << std::endl;
+        std::cerr << "Total_buffer_size must be divisible by the product of num_threads and "
+                     "num_initiator_dev"
+                  << ", next such value is "
+                  << total_buffer_size + partition - (total_buffer_size % partition) << std::endl;
         return -1;
     }
     partition = (num_target_dev * num_threads);
     if (total_buffer_size % partition) {
-        std::cerr << "Total_buffer_size must be divisible by the product of num_threads and num_target_dev"
-                  << ", next such value is " << total_buffer_size + partition - (total_buffer_size % partition)
-                  << std::endl;
+        std::cerr << "Total_buffer_size must be divisible by the product of num_threads and "
+                     "num_target_dev"
+                  << ", next such value is "
+                  << total_buffer_size + partition - (total_buffer_size % partition) << std::endl;
         return -1;
     }
 
@@ -431,17 +460,17 @@ xferBenchConfig::printConfig() {
     }
     printOption("Worker type (--worker_type=[nixl,nvshmem])", worker_type);
     if (worker_type == XFERBENCH_WORKER_NIXL) {
-        printOption("Backend (--backend=[UCX,GDS,GDS_MT,POSIX,Mooncake,HF3FS,OBJ])", backend);
+        printOption("Backend (--backend=[UCX,GDS,GDS_MT,POSIX,Mooncake,HF3FS,OBJ,Gismo])", backend);
         printOption ("Enable pt (--enable_pt=[0,1])", std::to_string (enable_pt));
         printOption("Progress threads (--progress_threads=N)", std::to_string(progress_threads));
-        printOption ("Device list (--device_list=dev1,dev2,...)", device_list);
-        printOption ("Enable VMM (--enable_vmm=[0,1])", std::to_string (enable_vmm));
+        printOption("Device list (--device_list=dev1,dev2,...)", device_list);
+        printOption("Enable VMM (--enable_vmm=[0,1])", std::to_string(enable_vmm));
 
         // Print GDS options if backend is GDS
         if (backend == XFERBENCH_BACKEND_GDS) {
-            printOption ("GDS batch pool size (--gds_batch_pool_size=N)",
-                         std::to_string (gds_batch_pool_size));
-            printOption ("GDS batch limit (--gds_batch_limit=N)", std::to_string (gds_batch_limit));
+            printOption("GDS batch pool size (--gds_batch_pool_size=N)",
+                        std::to_string(gds_batch_pool_size));
+            printOption("GDS batch limit (--gds_batch_limit=N)", std::to_string(gds_batch_limit));
         }
 
         if (backend == XFERBENCH_BACKEND_GDS_MT) {
@@ -472,10 +501,10 @@ xferBenchConfig::printConfig() {
         }
 
         if (xferBenchConfig::isStorageBackend()) {
-            printOption ("filepath (--filepath=path)", filepath);
-            printOption ("Number of files (--num_files=N)", std::to_string (num_files));
-            printOption ("Storage enable direct (--storage_enable_direct=[0,1])",
-                         std::to_string (storage_enable_direct));
+            printOption("filepath (--filepath=path)", filepath);
+            printOption("Number of files (--num_files=N)", std::to_string(num_files));
+            printOption("Storage enable direct (--storage_enable_direct=[0,1])",
+                        std::to_string(storage_enable_direct));
         }
 
         // Print DOCA GPUNetIO options if backend is DOCA GPUNetIO
@@ -484,32 +513,44 @@ xferBenchConfig::printConfig() {
                          gpunetio_device_list);
             printOption("OOB network interface name for control path (--oob_list=ifface)",
                         gpunetio_oob_list);
+            printOption("GPU CUDA Device id list (--device_list=dev1,dev2,...)",
+                        gpunetio_device_list);
+        }
+
+        if (backend == XFERBENCH_BACKEND_GISMO) {            
+            printOption("Gismo offload (--Gismo_offload_mode)",
+                        gismo_offload_mode ? "true" : "false");
+            printOption("Gismo record metrics (--Gismo_record_metrics)",
+                        gismo_record_metrics ? "true" : "false");
+            printOption("Gismo use mmap (--Gismo_use_mmap)", gismo_use_mmap ? "true" : "false");
+            printOption("Gismo chunk size (--Gismo_chunk_size)", std::to_string(gismo_chunk_size));
+            printOption("Gismo sock path (--Gismo_sock_path)", gismo_sock_path);
         }
     }
-    printOption ("Initiator seg type (--initiator_seg_type=[DRAM,VRAM])", initiator_seg_type);
-    printOption ("Target seg type (--target_seg_type=[DRAM,VRAM])", target_seg_type);
-    printOption ("Scheme (--scheme=[pairwise,manytoone,onetomany,tp])", scheme);
-    printOption ("Mode (--mode=[SG,MG])", mode);
-    printOption ("Op type (--op_type=[READ,WRITE])", op_type);
-    printOption ("Check consistency (--check_consistency=[0,1])",
-                 std::to_string (check_consistency));
-    printOption ("Total buffer size (--total_buffer_size=N)", std::to_string (total_buffer_size));
-    printOption ("Num initiator dev (--num_initiator_dev=N)", std::to_string (num_initiator_dev));
-    printOption ("Num target dev (--num_target_dev=N)", std::to_string (num_target_dev));
-    printOption ("Start block size (--start_block_size=N)", std::to_string (start_block_size));
-    printOption ("Max block size (--max_block_size=N)", std::to_string (max_block_size));
-    printOption ("Start batch size (--start_batch_size=N)", std::to_string (start_batch_size));
-    printOption ("Max batch size (--max_batch_size=N)", std::to_string (max_batch_size));
-    printOption ("Num iter (--num_iter=N)", std::to_string (num_iter));
-    printOption ("Warmup iter (--warmup_iter=N)", std::to_string (warmup_iter));
+    printOption("Initiator seg type (--initiator_seg_type=[DRAM,VRAM])", initiator_seg_type);
+    printOption("Target seg type (--target_seg_type=[DRAM,VRAM])", target_seg_type);
+    printOption("Scheme (--scheme=[pairwise,manytoone,onetomany,tp])", scheme);
+    printOption("Mode (--mode=[SG,MG])", mode);
+    printOption("Op type (--op_type=[READ,WRITE])", op_type);
+    printOption("Check consistency (--check_consistency=[0,1])", std::to_string(check_consistency));
+    printOption("Total buffer size (--total_buffer_size=N)", std::to_string(total_buffer_size));
+    printOption("Num initiator dev (--num_initiator_dev=N)", std::to_string(num_initiator_dev));
+    printOption("Num target dev (--num_target_dev=N)", std::to_string(num_target_dev));
+    printOption("Start block size (--start_block_size=N)", std::to_string(start_block_size));
+    printOption("Max block size (--max_block_size=N)", std::to_string(max_block_size));
+    printOption("Start batch size (--start_batch_size=N)", std::to_string(start_batch_size));
+    printOption("Max batch size (--max_batch_size=N)", std::to_string(max_batch_size));
+    printOption("Num iter (--num_iter=N)", std::to_string(num_iter));
+    printOption("Warmup iter (--warmup_iter=N)", std::to_string(warmup_iter));
     printOption("Large block iter factor (--large_blk_iter_ftr=N)",
                 std::to_string(large_blk_iter_ftr));
-    printOption ("Num threads (--num_threads=N)", std::to_string (num_threads));
+    printOption("Num threads (--num_threads=N)", std::to_string(num_threads));
     printSeparator('-');
     std::cout << std::endl;
 }
 
-std::vector<std::string> xferBenchConfig::parseDeviceList() {
+std::vector<std::string>
+xferBenchConfig::parseDeviceList() {
     std::vector<std::string> devices;
     std::string dev;
     std::stringstream ss(xferBenchConfig::device_list);
@@ -517,17 +558,17 @@ std::vector<std::string> xferBenchConfig::parseDeviceList() {
     // TODO: Add support for other schemes
     if (xferBenchConfig::scheme == XFERBENCH_SCHEME_PAIRWISE &&
         xferBenchConfig::device_list != "all") {
-	    while (std::getline(ss, dev, ',')) {
+        while (std::getline(ss, dev, ',')) {
             devices.push_back(dev);
-	    }
+        }
 
-	    if ((int)devices.size() != xferBenchConfig::num_initiator_dev ||
+        if ((int)devices.size() != xferBenchConfig::num_initiator_dev ||
             (int)devices.size() != xferBenchConfig::num_target_dev) {
-	    	std::cerr << "Incorrect device list " << xferBenchConfig::device_list
-                      << " provided for pairwise scheme " << devices.size()
-                      << "# devices" << std::endl;
-	    	return {};
-	    }
+            std::cerr << "Incorrect device list " << xferBenchConfig::device_list
+                      << " provided for pairwise scheme " << devices.size() << "# devices"
+                      << std::endl;
+            return {};
+        }
     } else {
         devices.push_back("all");
     }
@@ -542,28 +583,35 @@ xferBenchConfig::isStorageBackend() {
             XFERBENCH_BACKEND_HF3FS == xferBenchConfig::backend ||
             XFERBENCH_BACKEND_POSIX == xferBenchConfig::backend ||
             XFERBENCH_BACKEND_OBJ == xferBenchConfig::backend ||
-            XFERBENCH_BACKEND_GUSLI == xferBenchConfig::backend);
+            XFERBENCH_BACKEND_GUSLI == xferBenchConfig::backend ||
+            (XFERBENCH_BACKEND_GISMO == xferBenchConfig::backend &&
+             xferBenchConfig::gismo_offload_mode));
 }
+
 /**********
  * xferBench Utils
  **********/
 xferBenchRT *xferBenchUtils::rt = nullptr;
 std::string xferBenchUtils::dev_to_use = "";
 
-void xferBenchUtils::setRT(xferBenchRT *rt) {
+void
+xferBenchUtils::setRT(xferBenchRT *rt) {
     xferBenchUtils::rt = rt;
 }
 
-void xferBenchUtils::setDevToUse(std::string dev) {
+void
+xferBenchUtils::setDevToUse(std::string dev) {
     dev_to_use = dev;
 }
 
-std::string xferBenchUtils::getDevToUse() {
+std::string
+xferBenchUtils::getDevToUse() {
     return dev_to_use;
 }
 
-static bool allBytesAre(void* buffer, size_t size, uint8_t value) {
-    uint8_t* byte_buffer = static_cast<uint8_t*>(buffer);
+static bool
+allBytesAre(void *buffer, size_t size, uint8_t value) {
+    uint8_t *byte_buffer = static_cast<uint8_t *>(buffer);
 
     // Iterate over each byte in the buffer
     for (size_t i = 0; i < size; ++i) {
@@ -681,10 +729,12 @@ void xferBenchUtils::checkConsistency(std::vector<std::vector<xferBenchIOV>> &io
                             exit(EXIT_FAILURE);
                         }
                         is_allocated = true;
-                        CHECK_CUDA_ERROR(cudaMemcpy(addr, (void *)iov.addr, len,
-                                                    cudaMemcpyDeviceToHost), "cudaMemcpy failed");
+                        CHECK_CUDA_ERROR(
+                            cudaMemcpy(addr, (void *)iov.addr, len, cudaMemcpyDeviceToHost),
+                            "cudaMemcpy failed");
 #else
-                        std::cerr << "Failure in consistency check: VRAM segment type not supported without CUDA"
+                        std::cerr << "Failure in consistency check: VRAM segment type not "
+                                     "supported without CUDA"
                                   << std::endl;
                         exit(EXIT_FAILURE);
 #endif
@@ -762,16 +812,18 @@ void xferBenchUtils::checkConsistency(std::vector<std::vector<xferBenchIOV>> &io
                 // This will be called on target process in case of write and
                 // on initiator process in case of read
                 if ((xferBenchConfig::op_type == XFERBENCH_OP_WRITE &&
-                 xferBenchConfig::target_seg_type == XFERBENCH_SEG_TYPE_VRAM) ||
-                (xferBenchConfig::op_type == XFERBENCH_OP_READ &&
-                 xferBenchConfig::initiator_seg_type == XFERBENCH_SEG_TYPE_VRAM)) {
+                     xferBenchConfig::target_seg_type == XFERBENCH_SEG_TYPE_VRAM) ||
+                    (xferBenchConfig::op_type == XFERBENCH_OP_READ &&
+                     xferBenchConfig::initiator_seg_type == XFERBENCH_SEG_TYPE_VRAM)) {
 #if HAVE_CUDA
                     addr = calloc(1, len);
                     is_allocated = true;
-                    CHECK_CUDA_ERROR(cudaMemcpy(addr, (void *)iov.addr, len,
-                                                cudaMemcpyDeviceToHost), "cudaMemcpy failed");
+                    CHECK_CUDA_ERROR(
+                        cudaMemcpy(addr, (void *)iov.addr, len, cudaMemcpyDeviceToHost),
+                        "cudaMemcpy failed");
 #else
-                    std::cerr << "Failure in consistency check: VRAM segment type not supported without CUDA"
+                    std::cerr << "Failure in consistency check: VRAM segment type not supported "
+                                 "without CUDA"
                               << std::endl;
                     exit(EXIT_FAILURE);
 #endif
@@ -783,9 +835,9 @@ void xferBenchUtils::checkConsistency(std::vector<std::vector<xferBenchIOV>> &io
                 }
             }
 
-            if("WRITE" == xferBenchConfig::op_type) {
+            if ("WRITE" == xferBenchConfig::op_type) {
                 check_val = XFERBENCH_INITIATOR_BUFFER_ELEMENT;
-            } else if("READ" == xferBenchConfig::op_type) {
+            } else if ("READ" == xferBenchConfig::op_type) {
                 check_val = XFERBENCH_TARGET_BUFFER_ELEMENT;
             }
             rc = allBytesAre(addr, len, check_val);
@@ -877,8 +929,8 @@ xferBenchUtils::printStats(bool is_target,
         avg_latency /= xferBenchConfig::num_initiator_dev; // In microsec
     }
 
-    throughput_gb = (((double) total_data_transferred / (1000 * 1000 * 1000)) /
-                   (total_duration / 1e6));   // In GB/Sec
+    throughput_gb = (((double)total_data_transferred / (1000 * 1000 * 1000)) /
+                     (total_duration / 1e6)); // In GB/Sec
 
     if (IS_PAIRWISE_AND_SG() && rt->getSize() > 2) {
         rt->reduceSumDouble(&throughput_gb, &totalbw, 0);
