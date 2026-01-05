@@ -121,3 +121,35 @@ if enabled_plugins.get('GPUNETIO')
 endif
 
 subdir('telemetry')
+
+source_root = meson.project_source_root()
+dmo_path = get_option('dmo_path')
+message('dmo_path is', dmo_path)
+# if we use absolute path and it's within meson source tree
+if fs.is_absolute(dmo_path)
+  if dmo_path.startswith(source_root)
+    # convert the absolute path to relative
+    # meson has no length method for string so here's a workaround
+    arr = []
+    foreach i : range(512)
+      arr += source_root[i]
+      if ''.join(arr) == source_root
+        break
+      endif
+    endforeach
+    dmo_path = dmo_path.substring(arr.length()+1)
+  endif
+endif
+# convert to absolute path to find the lib
+if fs.is_absolute(dmo_path)
+  abs_gismo_path = dmo_path
+else
+  abs_gismo_path = join_paths(source_root, dmo_path)
+endif
+message('abs_gismo_path is', abs_gismo_path)
+gismo_lib_path = join_paths(abs_gismo_path, 'lib')
+gismo_lib_file = 'mvfs'
+gismo_lib_found = cc.find_library(gismo_lib_file, dirs: [gismo_lib_path], required: false)
+if gismo_lib_found.found()
+  subdir('gismo')
+endif

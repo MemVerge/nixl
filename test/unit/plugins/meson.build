@@ -98,3 +98,8 @@ if enabled_plugins.get('GUSLI')
         subdir('gusli')
     endif
 endif
+
+gismo_lib_found = cc.find_library(gismo_lib_file, dirs: [gismo_lib_path], required: false)
+if gismo_lib_found.found()
+  subdir('gismo')
+endif
